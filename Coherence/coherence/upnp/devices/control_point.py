@@ -1,7 +1,7 @@
 # Licensed under the MIT license
 # http://opensource.org/licenses/mit-license.php
 
-# Copyright 2006-2010 Frank Scholz <dev@coherence-project.org>
+# Copyright 2006, Frank Scholz <coherence@beebits.net>
 
 import string
 import traceback
@@ -12,12 +12,6 @@ from twisted.web import xmlrpc, client
 
 from coherence.upnp.core import service
 from coherence.upnp.core.event import EventServer
-
-from coherence.upnp.devices.media_server_client import MediaServerClient
-from coherence.upnp.devices.media_renderer_client import MediaRendererClient
-from coherence.upnp.devices.binary_light_client import BinaryLightClient
-from coherence.upnp.devices.dimmable_light_client import DimmableLightClient
-from coherence.upnp.devices.internet_gateway_device_client import InternetGatewayDeviceClient
 
 import coherence.extern.louie as louie
 
@@ -78,18 +72,6 @@ class ControlPoint(log.Loggable):
 
         louie.connect(self.completed, 'Coherence.UPnP.DeviceClient.detection_completed', louie.Any)
 
-    def shutdown(self):
-        louie.disconnect(self.check_device, 'Coherence.UPnP.Device.detection_completed', louie.Any)
-        louie.disconnect(self.remove_client, 'Coherence.UPnP.Device.remove_client', louie.Any)
-        louie.disconnect(self.completed, 'Coherence.UPnP.DeviceClient.detection_completed', louie.Any)
-
-    def auto_client_append(self,device_type):
-        if device_type in self.auto_client:
-            return
-        self.auto_client.append(device_type)
-        for device in self.get_devices():
-            self.check_device( device)
-
     def browse(self, device):
         device = self.coherence.get_device_with_usn(infos['USN'])
         if not device:
@@ -128,28 +110,6 @@ class ControlPoint(log.Loggable):
         return self.coherence.get_device_by_host(host)
 
     def check_device( self, device):
-        if device.client == None:
-            self.info("found device %s of type %s - %r" %(device.get_friendly_name(),
-                                                device.get_device_type(), device.client))
-            short_type = device.get_friendly_device_type()
-            if short_type in self.auto_client and short_type is not None:
-                self.info("identified %s %r" %
-                        (short_type, device.get_friendly_name()))
-
-                if short_type == 'MediaServer':
-                    client = MediaServerClient(device)
-                if short_type == 'MediaRenderer':
-                    client = MediaRendererClient(device)
-                if short_type == 'BinaryLight':
-                    client = BinaryLightClient(device)
-                if short_type == 'DimmableLight':
-                    client = DimmableLightClient(device)
-                if short_type == 'InternetGatewayDevice':
-                    client = InternetGatewayDeviceClient(device)
-
-                client.coherence = self.coherence
-                device.set_client( client)
-
         self.process_queries(device)
 
     def completed(self, client, udn):

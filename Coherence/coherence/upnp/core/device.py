@@ -8,6 +8,7 @@ import urllib2
 import time
 
 from twisted.internet import defer
+from twisted.internet import reactor
 
 from coherence.upnp.core.service import Service
 from coherence.upnp.core import utils
@@ -20,8 +21,10 @@ ns = "urn:schemas-upnp-org:device-1-0"
 class Device(log.Loggable):
     logCategory = 'device'
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, coherence=None, interface=None):
         self.parent = parent
+        self.coherence = coherence
+        self.interface = interface
         self.services = []
         #self.uid = self.usn[:-len(self.st)-2]
         self.friendly_name = ""
@@ -97,25 +100,13 @@ class Device(log.Loggable):
     def get_uuid(self):
         return self.udn[5:]
 
-    def get_embedded_devices(self):
-        return self.devices
-
-    def get_embedded_device_by_type(self,type):
-        r = []
-        for device in self.devices:
-            if type == device.friendly_device_type:
-                r.append(device)
-        return r
-
     def get_services(self):
         return self.services
 
     def get_service_by_type(self,type):
-        if not isinstance(type,(tuple,list)):
-            type = [type,]
         for service in self.services:
             _,_,_,service_class,version = service.service_type.split(':')
-            if service_class in type:
+            if service_class == type:
                 return service
 
     def add_service(self, service):
@@ -263,7 +254,9 @@ class Device(log.Loggable):
                     i['height'] = icon.find('./{%s}height' % ns).text
                     i['depth'] = icon.find('./{%s}depth' % ns).text
                     i['realurl'] = icon.find('./{%s}url' % ns).text
-                    i['url'] = self.make_fullyqualified(i['realurl'])
+                    i['url'] = icon.find('./{%s}url' % ns).text
+                    if i['url'].startswith('/'):
+                        i['url'] = ''.join((url_base,i['url']))
                     self.icons.append(i)
                     self.debug("adding icon %r for %r" % (i,self.friendly_name))
                 except:
@@ -272,7 +265,7 @@ class Device(log.Loggable):
                     self.warning("device %r seems to have an invalid icon description, ignoring that icon" % self.friendly_name)
 
         serviceList = d.find('./{%s}serviceList' % ns)
-        if serviceList:
+        if serviceList is not None:
             for service in serviceList.findall('./{%s}service' % ns):
                 serviceType = service.findtext('{%s}serviceType' % ns)
                 serviceId = service.findtext('{%s}serviceId' % ns)
@@ -298,9 +291,9 @@ class Device(log.Loggable):
 
             # now look for all sub devices
             embedded_devices = d.find('./{%s}deviceList' % ns)
-            if embedded_devices:
+            if embedded_devices is not None:
                 for d in embedded_devices.findall('./{%s}device' % ns):
-                    embedded_device = Device(self)
+                    embedded_device = Device(self, self.coherence, self.interface)
                     self.add_device(embedded_device)
                     embedded_device.parse_device(d)
 
@@ -445,7 +438,7 @@ class Device(log.Loggable):
 
 class RootDevice(Device):
 
-    def __init__(self, infos):
+    def __init__(self, infos, coherence, interface):
         self.usn = infos['USN']
         self.server = infos['SERVER']
         self.st = infos['ST']
@@ -453,19 +446,14 @@ class RootDevice(Device):
         self.manifestation = infos['MANIFESTATION']
         self.host = infos['HOST']
         self.root_detection_completed = False
-        Device.__init__(self, None)
+        Device.__init__(self, None, coherence, interface)
         louie.connect( self.device_detect, 'Coherence.UPnP.Device.detection_completed', self)
         # we need to handle root device completion
         # these events could be ourself or our children.
-        self.parse_description()
+        reactor.callLater(0.5, self.parse_description)
 
     def __repr__(self):
         return "rootdevice %r %r %r %r, manifestation %r" % (self.friendly_name,self.udn,self.st,self.host,self.manifestation)
-
-    def remove(self, *args):
-        result = Device.remove(self, *args)
-        louie.send('Coherence.UPnP.RootDevice.removed', self, usn=self.get_usn())
-        return result
 
     def get_usn(self):
         return self.usn
@@ -497,15 +485,13 @@ class RootDevice(Device):
 
     def device_detect( self, *args, **kwargs):
         self.debug("device_detect %r", kwargs)
-        self.debug("root_detection_completed %r", self.root_detection_completed)
         if self.root_detection_completed == True:
             return
+        self.debug("root_detection_completed %r", self.root_detection_completed)
         # our self is not complete yet
-
-        self.debug("detection_completed %r", self.detection_completed)
         if self.detection_completed == False:
             return
-
+        self.debug("detection_completed %r", self.detection_completed)
         # now check child devices.
         self.debug("self.devices %r", self.devices)
         for d in self.devices:
@@ -530,35 +516,28 @@ class RootDevice(Device):
         def gotPage(x):
             self.debug("got device description from %r" % self.location)
             data, headers = x
-            xml_data = None
+            tree = utils.parse_xml(data, 'utf-8').getroot()
+
+            major = tree.findtext('./{%s}specVersion/{%s}major' % (ns,ns))
+            minor = tree.findtext('./{%s}specVersion/{%s}minor' % (ns,ns))
             try:
-                xml_data = utils.parse_xml(data, 'utf-8')
+                self.upnp_version = '.'.join((major,minor))
             except:
-                self.warning("Invalid device description received from %r", self.location)
+                self.upnp_version = 'n/a'
+            try:
+                self.urlbase = tree.findtext('./{%s}URLBase' % ns)
+            except:
                 import traceback
                 self.debug(traceback.format_exc())
-            
-            if xml_data is not None:
-                tree = xml_data.getroot()
-                major = tree.findtext('./{%s}specVersion/{%s}major' % (ns,ns))
-                minor = tree.findtext('./{%s}specVersion/{%s}minor' % (ns,ns))
-                try:
-                    self.upnp_version = '.'.join((major,minor))
-                except:
-                    self.upnp_version = 'n/a'
-                try:
-                    self.urlbase = tree.findtext('./{%s}URLBase' % ns)
-                except:
-                    import traceback
-                    self.debug(traceback.format_exc())
-    
-                d = tree.find('./{%s}device' % ns)
-                if d is not None:
-                    self.parse_device(d) # root device
+
+            d = tree.find('./{%s}device' % ns)
+            if d is not None:
+                self.parse_device(d) # root device
 
         def gotError(failure, url):
             self.warning("error getting device description from %r", url)
             self.info(failure)
+            utils.getPage(self.location).addCallbacks(gotPage, gotError, None, None, [self.location], None)
 
         utils.getPage(self.location).addCallbacks(gotPage, gotError, None, None, [self.location], None)
 

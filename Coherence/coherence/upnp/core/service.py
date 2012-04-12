@@ -139,9 +139,12 @@ class Service(log.Loggable):
     #    print "Service deleted"
     #    pass
 
-    def _get_client(self, name):
+    def _get_client(self, name, type=None):
         url = self.get_control_url()
-        namespace = self.get_type()
+        if type is None:
+            namespace = self.get_type()
+        else:
+            namespace = type
         action = "%s#%s" % (namespace, name)
         client = SOAPProxy( url, namespace=("u",namespace), soapaction=action)
         return client
@@ -238,8 +241,6 @@ class Service(log.Loggable):
     def subscribe(self):
         self.debug("subscribe %s", self.id)
         event.subscribe(self)
-        #global subscribers
-        #subscribers[self.get_sid()] = self
 
     def unsubscribe(self):
 
@@ -247,9 +248,7 @@ class Service(log.Loggable):
             self.debug("remove subscription for %s", self.id)
             unsubscribe(self)
             self.subscription_id = None
-            #global subscribers
-            #if subscribers.has_key(sid):
-            #    del subscribers[sid]
+
 
         self.debug("unsubscribe %s", self.id)
         d = event.unsubscribe(self)
@@ -277,6 +276,8 @@ class Service(log.Loggable):
             if var_name == 'LastChange':
                 self.info("we have a LastChange event")
                 self.get_state_variable(var_name, 0).update(var_value)
+                if len(var_value) == 0:
+                    continue
                 tree = utils.parse_xml(var_value, 'utf-8').getroot()
                 namespace_uri, tag = tree.tag[1:].split( "}", 1)
                 for instance in tree.findall('{%s}InstanceID' % namespace_uri):
@@ -327,7 +328,13 @@ class Service(log.Loggable):
             #print "gotPage"
             #print x
             self.scpdXML, headers = x
-            tree = utils.parse_xml(self.scpdXML, 'utf-8').getroot()
+            self.scpdXML = self.scpdXML.replace('diretion', 'direction')
+            parsed = utils.parse_xml(self.scpdXML, 'utf-8')
+
+            if not parsed:
+                return
+            
+            tree = parsed.getroot()
             ns = "urn:schemas-upnp-org:service-1-0"
 
             for action_node in tree.findall('.//{%s}action' % ns):
@@ -760,7 +767,7 @@ class ServiceServer(log.Loggable):
                 if((hasattr(self,'implementation') and self.implementation == 'required') or
                     not hasattr(self,'implementation')):
                     self.warning('%s has a missing callback for %s action %s, service disabled' % (self.id,implementation,name))
-                raise LookupError("missing callback")
+                raise LookupError,"missing callback"
 
         arguments_list = []
         for argument in arguments:

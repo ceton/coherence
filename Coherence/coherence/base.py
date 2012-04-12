@@ -18,7 +18,6 @@ from twisted.web import resource,static
 import coherence.extern.louie as louie
 
 from coherence import __version__
-from coherence import log
 
 from coherence.upnp.core.ssdp import SSDPServer
 from coherence.upnp.core.msearch import MSearch
@@ -26,19 +25,10 @@ from coherence.upnp.core.device import Device, RootDevice
 from coherence.upnp.core.utils import parse_xml, get_ip_address, get_host_address
 
 from coherence.upnp.core.utils import Site
-
 from coherence.upnp.devices.control_point import ControlPoint
-from coherence.upnp.devices.media_server import MediaServer
-from coherence.upnp.devices.media_renderer import MediaRenderer
-from coherence.upnp.devices.binary_light import BinaryLight
-from coherence.upnp.devices.dimmable_light import DimmableLight
 
 
-try:
-    import pkg_resources
-except ImportError:
-    pkg_resources = None
-
+from coherence import log
 
 class SimpleRoot(resource.Resource, log.Loggable):
     addSlash = True
@@ -157,18 +147,7 @@ class Plugins(log.Loggable):
         pass
 
     def __getitem__(self, key):
-        plugin = self._plugins.__getitem__(key)
-        if pkg_resources and isinstance(plugin, pkg_resources.EntryPoint):
-            try:
-                plugin = plugin.load(require=False)
-            except (ImportError, AttributeError, pkg_resources.ResolutionError), msg:
-                self.warning("Can't load plugin %s (%s), maybe missing dependencies..." % (plugin.name,msg))
-                self.info(traceback.format_exc())
-                del self._plugins[key]
-                raise KeyError
-            else:
-                self._plugins[key] = plugin
-        return plugin
+        return self._plugins.__getitem__(key)
 
     def get(self, key,default=None):
         try:
@@ -187,14 +166,22 @@ class Plugins(log.Loggable):
 
     def _collect(self, ids=_valids):
         if not isinstance(ids, (list,tuple)):
-            ids = (ids,)
-        if pkg_resources:
-            for group in ids:
-                for entrypoint in pkg_resources.iter_entry_points(group):
-                    # set a placeholder for lazy loading
-                    self._plugins[entrypoint.name] = entrypoint
-        else:
+            ids = (ids)
+        try:
+            import pkg_resources
+            for id in ids:
+                for entrypoint in pkg_resources.iter_entry_points(id):
+                    try:
+                        #print entrypoint, type(entrypoint)
+                        self._plugins[entrypoint.name] = entrypoint.load(require=False)
+                    except (ImportError, AttributeError, pkg_resources.ResolutionError), msg:
+                        self.warning("Can't load plugin %s (%s), maybe missing dependencies..." % (entrypoint.name,msg))
+                        self.info(traceback.format_exc())
+        except ImportError:
             self.info("no pkg_resources, fallback to simple plugin handling")
+
+        except Exception, msg:
+            self.warning(msg)
 
         if len(self._plugins) == 0:
             self._collect_from_module()
@@ -234,16 +221,17 @@ class Coherence(log.Loggable):
         self.cls._instance_ = None
 
     def setup(self, config={}):
-        self.mirabeau = None
+        self._mirabeau = None
 
         self.devices = []
+        self.ssdp_servers = []
+        self.msearches = []
         self.children = {}
         self._callbacks = {}
         self.active_backends = {}
 
         self.dbus = None
         self.config = config
-        self.ctrl = None
 
         network_if = config.get('interface')
 
@@ -322,16 +310,10 @@ class Coherence(log.Loggable):
         else:
             unittest = True
 
-        self.ssdp_server = SSDPServer(test=unittest,interface=self.hostname)
         louie.connect( self.create_device, 'Coherence.UPnP.SSDP.new_device', louie.Any)
         louie.connect( self.remove_device, 'Coherence.UPnP.SSDP.removed_device', louie.Any)
         louie.connect( self.add_device, 'Coherence.UPnP.RootDevice.detection_completed', louie.Any)
         #louie.connect( self.receiver, 'Coherence.UPnP.Service.detection_completed', louie.Any)
-
-        self.ssdp_server.subscribe("new_device", self.add_device)
-        self.ssdp_server.subscribe("removed_device", self.remove_device)
-
-        self.msearch = MSearch(self.ssdp_server,test=unittest)
 
         reactor.addSystemEventTrigger( 'before', 'shutdown', self.shutdown, force=True)
 
@@ -349,6 +331,7 @@ class Coherence(log.Loggable):
 
         self.available_plugins = None
 
+        self.ctrl = None
 
         try:
             plugins = self.config['plugin']
@@ -391,44 +374,36 @@ class Coherence(log.Loggable):
                         self.warning("Can't enable plugin, %s: %s!" % (plugin, msg))
                         self.info(traceback.format_exc())
 
-
         self.external_address = ':'.join((self.hostname,str(self.web_server_port)))
 
+    def add_interface(self, interface):
+        self.info('added interface %s' % interface)
+        ssdp_server = SSDPServer(interface=interface)
+        ssdp_server.subscribe("new_device", self.add_device)
+        ssdp_server.subscribe("removed_device", self.remove_device)
+        msearch = MSearch(ssdp_server)
 
-        if(self.config.get('controlpoint', 'no') == 'yes' or
-           self.config.get('json','no') == 'yes'):
-            self.ctrl = ControlPoint(self)
+        self.ssdp_servers.append(ssdp_server)
+        self.msearches.append(msearch)
 
-        if self.config.get('json','no') == 'yes':
-            from coherence.json import JsonInterface
-            self.json = JsonInterface(self.ctrl)
-
-        if self.config.get('transcoding', 'no') == 'yes':
-            from coherence.transcoder import TranscoderManager
-            self.transcoder_manager = TranscoderManager(self)
-
-
-        self.dbus = None
-        if self.config.get('use_dbus', 'no') == 'yes':
-            try:
-                from coherence import dbus_service
-                if self.ctrl == None:
-                    self.ctrl = ControlPoint(self)
-                self.ctrl.auto_client_append('InternetGatewayDevice')
-                self.dbus = dbus_service.DBusPontoon(self.ctrl)
-            except Exception, msg:
-                self.warning("Unable to activate dbus sub-system: %r" % msg)
-                self.debug(traceback.format_exc())
-            else:
-                if self.config.get('enable_mirabeau', 'no') == 'yes':
-                    from coherence import mirabeau
-                    from coherence.tube_service import MirabeauProxy
-
-                    mirabeau_cfg = self.config.get('mirabeau', {})
-
-                    self.mirabeau = mirabeau.Mirabeau(mirabeau_cfg, self)
-                    self.add_web_resource('mirabeau', MirabeauProxy())
-                    self.mirabeau.start()
+    def remove_interface(self, interface):
+        self.info('removing interface %s' % interface)
+        ssdp_server = None
+        for s in self.ssdp_servers:
+            if s.interface == interface:
+                ssdp_server = s
+                break
+        if ssdp_server:
+            ssdp_server.unsubscribe("new_device", self.add_device)
+            ssdp_server.unsubscribe("removed_device", self.remove_device)
+            msearch = None
+            for m in self.msearches:
+                if m.ssdp_server.interface == interface:
+                    msearch = m
+                    break
+            if msearch:
+                self.msearches.remove(msearch)
+            self.ssdp_servers.remove(ssdp_server)
 
     def add_plugin(self, plugin, **kwargs):
         self.info("adding plugin %r", plugin)
@@ -480,6 +455,9 @@ class Coherence(log.Loggable):
             self.warning("no backend with the uuid %r found" % plugin.uuid)
             return ""
 
+    def init_control_point(self):
+        self.control_point = ControlPoint(self)
+
     def writeable_config(self):
         """ do we have a new-style config file """
         from coherence.extern.simple_config import ConfigItem
@@ -526,63 +504,46 @@ class Coherence(log.Loggable):
         if self._incarnations_ > 1:
             self._incarnations_ -= 1
             return
+        if self._mirabeau is not None:
+            self._mirabeau.stop()
+            self._mirabeau = None
+        for backend in self.active_backends.itervalues():
+            backend.unregister()
+        self.active_backends = {}
+        """ send service unsubscribe messages """
+        try:
+            if self.web_server.port != None:
+                self.web_server.port.stopListening()
+                self.web_server.port = None
+            for m in self.msearches:
+                if hasattr(m, 'discover_loop'):
+                    m.discover_loop.stop()
+                if hasattr(m, 'port'):
+                    m.port.stopListening()
 
-        def _shutdown():
-            self.mirabeau = None
-            if self.dbus:
-                self.dbus.shutdown()
-                self.dbus = None
-
-            for backend in self.active_backends.itervalues():
-                backend.unregister()
-            self.active_backends = {}
-            """ send service unsubscribe messages """
-            try:
-                if self.web_server.port != None:
-                    self.web_server.port.stopListening()
-                    self.web_server.port = None
-                if hasattr(self.msearch, 'double_discover_loop'):
-                    self.msearch.double_discover_loop.stop()
-                if hasattr(self.msearch, 'port'):
-                    self.msearch.port.stopListening()
-                if hasattr(self.ssdp_server, 'resend_notify_loop'):
-                    self.ssdp_server.resend_notify_loop.stop()
-                if hasattr(self.ssdp_server, 'port'):
-                    self.ssdp_server.port.stopListening()
-                #self.renew_service_subscription_loop.stop()
-            except:
-                pass
-            l = []
-            for root_device in self.get_devices():
-                for device in root_device.get_devices():
-                    d = device.unsubscribe_service_subscriptions()
-                    d.addCallback(device.remove)
-                    l.append(d)
-                d = root_device.unsubscribe_service_subscriptions()
-                d.addCallback(root_device.remove)
+            for s in self.ssdp_servers:
+                if hasattr(s, 'resend_notify_loop'):
+                    s.resend_notify_loop.stop()
+                if hasattr(s, 'port'):
+                    s.port.stopListening()
+        except:
+            pass
+        l = []
+        for root_device in self.get_devices():
+            for device in root_device.get_devices():
+                d = device.unsubscribe_service_subscriptions()
                 l.append(d)
+                d.addCallback(device.remove)
+            d = root_device.unsubscribe_service_subscriptions()
+            l.append(d)
+            d.addCallback(root_device.remove)
 
-            def homecleanup(result):
-                """anything left over"""
-                louie.disconnect( self.create_device, 'Coherence.UPnP.SSDP.new_device', louie.Any)
-                louie.disconnect( self.remove_device, 'Coherence.UPnP.SSDP.removed_device', louie.Any)
-                louie.disconnect( self.add_device, 'Coherence.UPnP.RootDevice.detection_completed', louie.Any)
-                self.ssdp_server.shutdown()
-                if self.ctrl:
-                    self.ctrl.shutdown()
-                self.warning('Coherence UPnP framework shutdown')
-                return result
-
-            dl = defer.DeferredList(l)
-            dl.addCallback(homecleanup)
-            return dl
-
-        if self.mirabeau is not None:
-            d = defer.maybeDeferred(self.mirabeau.stop)
-            d.addBoth(lambda x: _shutdown())
-            return d
-        else:
-            return _shutdown()
+        """anything left over"""
+        for s in self.ssdp_servers:
+            s.shutdown()
+        dl = defer.DeferredList(l)
+        self.warning('Coherence UPnP framework shutdown')
+        return dl
 
     def check_devices(self):
         """ iterate over devices and their embedded ones and renew subscriptions """
@@ -639,26 +600,26 @@ class Coherence(log.Loggable):
     def get_nonlocal_devices(self):
         return [d for d in self.devices if d.manifestation == 'remote']
 
-    def create_device(self, device_type, infos):
+    def create_device(self, device_type, infos, interface):
         self.info("creating ", infos['ST'],infos['USN'])
         if infos['ST'] == 'upnp:rootdevice':
             self.info("creating upnp:rootdevice ", infos['USN'])
-            root = RootDevice(infos)
+            root = RootDevice(infos, self, interface)
         else:
             self.info("creating device/service ",infos['USN'])
             root_id = infos['USN'][:-len(infos['ST'])-2]
             root = self.get_device_with_id(root_id)
-            device = Device(infos, root)
+            device = Device(infos, root, self, interface)
         # fire this only after the device detection is fully completed
         # and we are on the device level already, so we can work with them instead with the SSDP announce
         #if infos['ST'] == 'upnp:rootdevice':
         #    self.callback("new_device", infos['ST'], infos)
 
     def add_device(self, device):
-        self.info("adding device",device.get_id(),device.get_usn(),device.friendly_device_type)
+        self.info("adding device",device.get_id(),device.get_usn(),device.friendly_device_type, device.get_location())
         self.devices.append(device)
 
-    def remove_device(self, device_type, infos):
+    def remove_device(self, device_type, infos, interface):
         self.info("removed device",infos['ST'],infos['USN'])
         device = self.get_device_with_usn(infos['USN'])
         if device:
@@ -667,7 +628,7 @@ class Coherence(log.Loggable):
             device.remove()
             if infos['ST'] == 'upnp:rootdevice':
                 louie.send('Coherence.UPnP.RootDevice.removed', None, usn=infos['USN'])
-                self.callback("removed_device", infos['ST'], infos['USN'])
+                self.callback("removed_device", infos['ST'], infos['USN'], infos['LOCATION'])
 
 
     def add_web_resource(self, name, sub):

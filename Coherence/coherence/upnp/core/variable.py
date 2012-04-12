@@ -8,6 +8,8 @@ import time
 from sets import Set
 
 from coherence.upnp.core import utils
+from twisted.python.util import OrderedDict
+
 try:
     #FIXME:
     # there is some circular import, service imports variable, variable imports service
@@ -82,6 +84,34 @@ class StateVariable(log.Loggable):
 
     def set_never_evented(self, value):
         self.never_evented = utils.means_true(value)
+
+    def get(self):
+        self.info("getting", self.name)
+
+        action_name = 'QueryStateVariable'
+
+        def got_error(failure):
+            self.warning("error on %s request with %s %s" % (self.name,self.
+                                                            service.service_type,
+                                                            self.service.control_url))
+            self.info(failure)
+            return failure
+
+        client = self.service._get_client(action_name, type='urn:schemas-upnp-org:control-1-0')
+
+        ordered_arguments = OrderedDict()
+        ordered_arguments['varName'] = self.name
+
+
+        d = client.callRemote(action_name, ordered_arguments)
+        d.addCallback(self.got_results)
+        d.addErrback(got_error)
+        return d
+
+    def got_results( self, results):
+        self.debug("get %s results %r" % (self.name, results))
+        return results['return']
+
 
     def update(self, value):
         self.info("variable check for update", self.name, value, self.service)

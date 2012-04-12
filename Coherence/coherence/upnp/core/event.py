@@ -18,11 +18,6 @@ from coherence.upnp.core import utils
 
 import coherence.extern.louie as louie
 
-global hostname, web_server_port
-hostname = None
-web_server_port = None
-
-
 class EventServer(resource.Resource, log.Loggable):
     logCategory = 'event_server'
 
@@ -31,7 +26,6 @@ class EventServer(resource.Resource, log.Loggable):
         self.control_point = control_point
         self.coherence.add_web_resource('events',
                                         self)
-        global hostname, web_server_port
         hostname = self.coherence.hostname
         web_server_port = self.coherence.web_server_port
         self.info("EventServer ready...")
@@ -275,7 +269,9 @@ def subscribe(service, action='subscribe'):
         host = host_port
         port = 80
 
-    def send_request(p, action):
+    def send_request(p, action, service):
+        hostname = service.device.interface
+        web_server_port = service.device.coherence.web_server_port
         log.info(log_category, "event.subscribe.send_request %r, action: %r %r",
                  p, action, service.get_event_sub_url())
         _,_,event_path,_,_ = urlsplit(service.get_event_sub_url())
@@ -296,10 +292,6 @@ def subscribe(service, action='subscribe'):
         if service.get_sid():
             request.append("SID: %s" % service.get_sid())
         else:
-            # XXX use address and port set in the coherence instance
-            #ip_address = p.transport.getHost().host
-            global hostname, web_server_port
-            #print hostname, web_server_port
             url = 'http://%s:%d/events' % (hostname, web_server_port)
             request.append("CALLBACK: <%s>" % url)
             request.append("NT: upnp:event")
@@ -314,8 +306,6 @@ def subscribe(service, action='subscribe'):
             p.transport.writeSomeData(request)
         except AttributeError:
             log.info(log_category, "transport for event %r already gone", action)
-       # print "event.subscribe.send_request", d
-        #return d
 
     def got_error(failure, action):
         log.info(log_category, "error on %s request with %s" % (action,service.get_base_url()))
@@ -334,14 +324,12 @@ def subscribe(service, action='subscribe'):
             log.info(log_category, "event.subscribe.prepare_connection: %r %r",
                      host, port)
             d = c.connectTCP(host, port)
-            d.addCallback(send_request, action=action)
+            d.addCallback(send_request, action=action, service=service)
             d.addErrback(got_error, action)
-            #reactor.callLater(3, teardown_connection, c, d)
         else:
             d = defer.Deferred()
-            d.addCallback(send_request, action=action)
+            d.addCallback(send_request, action=action, service=service)
             d.callback(service.event_connection)
-            #send_request(service.event_connection, action)
         return d
 
     """ FIXME:
